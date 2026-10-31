@@ -1,0 +1,16 @@
+Host inference
+    HostName {{ llm_address }}
+    User {{ llm_tunnel_user }}
+    IdentityFile /var/lib/llm-tunnel/.ssh/id_ed25519
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    HostKeyAlias llm-inference
+    UserKnownHostsFile /var/lib/llm-tunnel/.ssh/known_hosts
+    GlobalKnownHostsFile /dev/null
+    UpdateHostKeys no
+    ExitOnForwardFailure yes
+    ConnectTimeout 10
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+    LocalForward 127.0.0.1:{{ llm_tunnel_port }} 127.0.0.1:{{ llm_listen_port }}

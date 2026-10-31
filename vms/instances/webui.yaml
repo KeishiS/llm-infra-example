@@ -1,0 +1,20 @@
+# IncusでのLLM WebUIサーバ設定
+name: webui
+type: virtual-machine
+architecture: x86_64
+profiles: []
+config:
+  limits.cpu: "2"
+  limits.memory: 4GiB
+  security.secureboot: "false"
+devices:
+  root:
+    type: disk
+    path: /
+    pool: llm-lab
+    size: 24GiB
+  eth0:
+    type: nic
+    name: eth0
+    network: llmbr0
+    ipv4.address: 192.168.76.20

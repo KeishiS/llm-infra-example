@@ -1,0 +1,14 @@
+[Unit]
+Description=LLM lab VM firewall
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft --file /etc/llm-lab-firewall.nft
+ExecReload=/usr/sbin/nft --file /etc/llm-lab-firewall.nft
+
+[Install]
+WantedBy=multi-user.target

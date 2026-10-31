@@ -1,0 +1,11 @@
+# nix develop / nix run ではflake.lockで固定したAnsible付属版を使用します。
+# Nixを使わずansible-coreだけを導入する場合の依存です。
+collections:
+  - name: community.general
+    version: "12.6.1"
+  - name: community.crypto
+    version: "3.2.1"
+  - name: ansible.posix
+    version: "2.2.0"
+  - name: containers.podman
+    version: "1.20.1"

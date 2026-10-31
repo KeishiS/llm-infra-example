@@ -1,0 +1,17 @@
+all:
+  vars:
+    private_ip: "{{ ansible_host }}"
+    vm_wait_seconds: 1200
+  children:
+    ldap_server:
+      hosts:
+        ldap:
+          ansible_host: 192.168.76.10
+    webui_server:
+      hosts:
+        webui:
+          ansible_host: 192.168.76.20
+    llm_server:
+      hosts:
+        llm:
+          ansible_host: 192.168.76.30

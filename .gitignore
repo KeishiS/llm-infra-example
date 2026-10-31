@@ -1,0 +1,8 @@
+/.state/
+
+/ansible/.collections/
+__pycache__/
+*.pyc
+
+/result
+/result-*

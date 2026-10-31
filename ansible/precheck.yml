@@ -1,0 +1,16 @@
+- name: Check VM readiness before configuration
+  hosts: all
+  become: true
+  tasks:
+    # SSH接続とAnsibleのPythonモジュール実行が可能になるまでの待機
+    - name: Wait for SSH and Python
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ vm_wait_seconds }}"
+
+    # cloud-initによる初期設定の完了待ち
+    - name: Wait for cloud-init completion
+      ansible.builtin.command: cloud-init status --wait
+      async: "{{ vm_wait_seconds }}"
+      poll: 5
+      changed_when: false
+      when: not ansible_check_mode

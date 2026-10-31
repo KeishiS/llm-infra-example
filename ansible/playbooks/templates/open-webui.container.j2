@@ -1,0 +1,22 @@
+[Unit]
+Description=LLM lab LDAP-authenticated chat and API backend
+Wants=network-online.target llm-tunnel.service
+After=network-online.target llm-tunnel.service
+
+[Container]
+Image={{ webui_image }}
+ContainerName=open-webui
+Pull=missing
+Network=host
+EnvironmentFile=/etc/open-webui/webui.env
+Volume=/srv/open-webui:/app/backend/data
+Volume=/etc/open-webui/ldap-ca.crt:/etc/ssl/llm-lab/ldap-ca.crt:ro
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

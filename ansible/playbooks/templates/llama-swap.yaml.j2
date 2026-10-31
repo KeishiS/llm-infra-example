@@ -1,0 +1,15 @@
+healthCheckTimeout: {{ llm_startup_seconds }}
+logToStdout: "proxy,upstream"
+models:
+  {{ llm_model_id }}:
+    proxy: "http://127.0.0.1:${PORT}"
+    checkEndpoint: /health
+    ttl: {{ llm_idle_seconds }}
+    unloadTimeout: 45
+    cmd: >-
+      /app/llama-server --hf-repo {{ llm_model }}
+      --alias {{ llm_model_id }} --host 127.0.0.1 --port ${PORT}
+      --ctx-size {{ llm_context_size }} --parallel 1
+      --n-gpu-layers 0 --threads {{ llm_threads }}
+      --jinja --reasoning-format deepseek
+      --chat-template-kwargs '{"enable_thinking":false}'

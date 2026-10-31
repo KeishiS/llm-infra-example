@@ -1,0 +1,27 @@
+[Unit]
+Description=LLM lab llama-swap and llama-server (CPU)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image={{ llm_image }}
+ContainerName=llama-swap
+Pull=missing
+Network=host
+Volume=/etc/llama-swap/config.yaml:/app/config.yaml:ro
+Volume=/srv/llama-swap/models:/models
+Environment=LLAMA_CACHE=/models
+Entrypoint=/app/llama-swap
+Exec=-config /app/config.yaml -listen 127.0.0.1:{{ llm_listen_port }}
+NoNewPrivileges=false
+StopTimeout=60
+LogDriver=journald
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=900
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

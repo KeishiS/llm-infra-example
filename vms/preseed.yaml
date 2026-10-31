@@ -1,0 +1,22 @@
+# incus admin init --preseed に渡す標準形式
+networks:
+  - name: llmbr0
+    project: default
+    type: bridge
+    config:
+      ipv4.address: 192.168.76.1/24
+      ipv4.nat: "true"
+      ipv6.address: none
+storage_pools:
+  - name: llm-lab
+    driver: dir
+projects:
+  - name: llm-lab
+    description: Ubuntu LLM lab
+    config:
+      features.images: "true"
+      features.profiles: "true"
+      features.networks: "false"
+      features.storage.volumes: "true"
+      restricted: "true"
+      restricted.networks.access: llmbr0

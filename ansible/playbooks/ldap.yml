@@ -1,0 +1,309 @@
+- name: Minimal OpenLDAP directory
+  hosts: ldap_server
+  become: true
+  vars_files:
+    - ../../.state/secrets.json
+  module_defaults:
+    community.general.ldap_entry:
+      server_uri: ldap://127.0.0.1
+      bind_dn: "{{ ldap_admin_dn }}"
+      bind_pw: "{{ ldap_admin_password }}"
+    community.general.ldap_attrs:
+      server_uri: ldap://127.0.0.1
+      bind_dn: "{{ ldap_admin_dn }}"
+      bind_pw: "{{ ldap_admin_password }}"
+  tasks:
+    # LDAP関連ツールの導入
+    - name: LDAP client and certificate packages
+      ansible.builtin.apt:
+        name: [ldap-utils, python3-ldap, python3-cryptography, openssl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # OpenLDAPコンテナ用のネットワーク作成
+    - name: LDAP container network
+      containers.podman.podman_network:
+        name: "{{ ldap_container_network }}"
+        subnet: "{{ ldap_container_subnet }}"
+        disable_dns: true
+        state: present
+
+    # OpenLDAPイメージ構築用ディレクトリ作成
+    - name: OpenLDAP configuration and build directory
+      ansible.builtin.file:
+        path: /etc/openldap/container
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Containerfile配置
+    - name: OpenLDAP Containerfile
+      ansible.builtin.copy:
+        src: openldap/Containerfile
+        dest: /etc/openldap/container/Containerfile
+        mode: "0644"
+      register: ldap_containerfile
+
+    # コンテナイメージのビルド
+    - name: Build OpenLDAP image
+      containers.podman.podman_image:
+        name: "{{ ldap_image }}"
+        path: /etc/openldap/container
+        state: build
+        pull: false
+        force: "{{ ldap_containerfile.changed }}"
+      notify: Restart lab LDAP
+
+    # コンテナへ共有するディレクトリ作成
+    - name: Dedicated directory database
+      ansible.builtin.file:
+        path: /srv/openldap/data
+        state: directory
+        owner: "101"
+        group: "101"
+        mode: "0700"
+
+    # 証明書・秘密鍵を保存するディレクトリ作成
+    - name: Private lab TLS directory
+      ansible.builtin.file:
+        path: "{{ ldap_tls_dir }}"
+        state: directory
+        owner: root
+        group: "101"
+        mode: "0750"
+
+    # 検証用CAの秘密鍵の生成・保存
+    - name: Persistent lab CA key
+      community.crypto.openssl_privatekey:
+        path: "{{ ldap_tls_dir }}/ca.key"
+        type: ECC
+        curve: secp256r1
+        mode: "0600"
+
+    # 検証用CAの証明書署名要求の生成
+    - name: Lab CA certificate request
+      community.crypto.openssl_csr:
+        path: "{{ ldap_tls_dir }}/ca.csr"
+        privatekey_path: "{{ ldap_tls_dir }}/ca.key"
+        common_name: LLM Lab CA
+        basic_constraints: ["CA:TRUE"]
+        basic_constraints_critical: true
+        key_usage: [keyCertSign, cRLSign]
+        key_usage_critical: true
+
+    # 検証用CAの自己署名証明書の生成・保存
+    - name: Persistent lab CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ ldap_tls_dir }}/ca.crt"
+        csr_path: "{{ ldap_tls_dir }}/ca.csr"
+        privatekey_path: "{{ ldap_tls_dir }}/ca.key"
+        provider: selfsigned
+        selfsigned_not_after: "+3650d"
+        mode: "0644"
+
+    # LDAPサーバの秘密鍵の生成・保存とコンテナからの読取権限の設定
+    - name: LDAP server TLS key
+      community.crypto.openssl_privatekey:
+        path: "{{ ldap_tls_dir }}/server.key"
+        type: ECC
+        curve: secp256r1
+        owner: root
+        group: "101"
+        mode: "0640"
+      notify: Restart lab LDAP
+
+    # LDAPサーバの証明書署名要求の生成
+    - name: LDAP server certificate request
+      community.crypto.openssl_csr:
+        path: "{{ ldap_tls_dir }}/server.csr"
+        privatekey_path: "{{ ldap_tls_dir }}/server.key"
+        common_name: ldap
+        subject_alt_name: ["DNS:ldap", "IP:{{ ldap_address }}"]
+        extended_key_usage: [serverAuth]
+
+    # 検証用CAによるLDAPサーバ証明書の署名・保存
+    - name: LDAP certificate signed by the lab CA
+      community.crypto.x509_certificate:
+        path: "{{ ldap_tls_dir }}/server.crt"
+        csr_path: "{{ ldap_tls_dir }}/server.csr"
+        provider: ownca
+        ownca_path: "{{ ldap_tls_dir }}/ca.crt"
+        ownca_privatekey_path: "{{ ldap_tls_dir }}/ca.key"
+        ownca_not_after: "+825d"
+        mode: "0644"
+      notify: Restart lab LDAP
+
+    # LDAPパスワードハッシュの生成
+    - name: LDAP account password hashes
+      ansible.builtin.command:
+        argv: [openssl, passwd, "-6", "-salt", "{{ item.salt }}", "-stdin"]
+        stdin: "{{ item.password }}"
+        stdin_add_newline: false
+      loop:
+        - {salt: llmlabadmin, password: "{{ ldap_admin_password }}"}
+        - {salt: llmlabreadonly, password: "{{ ldap_bind_password }}"}
+        - {salt: llmlabdemo, password: "{{ ldap_demo_password }}"}
+        - {salt: llmlabmember, password: "{{ ldap_member_password }}"}
+      register: ldap_hashes
+      changed_when: false
+      no_log: true
+
+    # OpenLDAP設定の検証・配置とエラー処理
+    - name: OpenLDAP configuration
+      block:
+        # コンテナ内のslaptestによる設定検証と、検証成功時の設定ファイル配置
+        - name: Validate and install OpenLDAP configuration
+          ansible.builtin.template:
+            src: slapd.conf.j2
+            dest: /etc/openldap/slapd.conf
+            owner: root
+            group: "101"
+            mode: "0640"
+            validate: >-
+              /usr/bin/podman run --rm --network none
+              --volume %s:/etc/ldap/slapd.conf:ro
+              --volume {{ ldap_tls_dir }}/ca.crt:{{ ldap_tls_dir }}/ca.crt:ro
+              --volume {{ ldap_tls_dir }}/server.crt:{{ ldap_tls_dir }}/server.crt:ro
+              --volume {{ ldap_tls_dir }}/server.key:{{ ldap_tls_dir }}/server.key:ro
+              {{ ldap_image }} /usr/sbin/slaptest -u -f /etc/ldap/slapd.conf
+          no_log: true
+          notify: Restart lab LDAP
+      rescue:
+        # エラー報告と処理停止
+        - name: Report OpenLDAP configuration error without the password hash
+          ansible.builtin.fail:
+            msg: >-
+              {{ ((ansible_failed_result.msg | default('')) ~ '\n' ~
+                  (ansible_failed_result.stderr | default('')) ~ '\n' ~
+                  (ansible_failed_result.stdout | default('')))
+                 | replace(ldap_hashes.results[0].stdout, '[REDACTED]') }}
+
+    # OpenLDAPコンテナのサービスファイル配置
+    - name: OpenLDAP Quadlet definition
+      ansible.builtin.template:
+        src: openldap.container.j2
+        dest: /etc/containers/systemd/openldap.container
+        mode: "0644"
+      notify: Restart lab LDAP
+
+    # OpenLDAPコンテナの起動
+    - name: OpenLDAP service
+      ansible.builtin.systemd_service:
+        name: openldap
+        state: started
+        daemon_reload: true
+
+    # handlerの実行
+    - name: Current LDAP configuration active before directory updates
+      ansible.builtin.meta: flush_handlers
+
+    # LDAPポートの接続開始の確認
+    - name: LDAP listener readiness
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 389
+        timeout: 60
+
+    # LDAPのアカウント階層の作成
+    - name: Directory base and organizational units
+      community.general.ldap_entry:
+        dn: "{{ item.dn }}"
+        objectClass: "{{ item.classes }}"
+        attributes: "{{ item.attributes }}"
+        state: present
+      loop:
+        - dn: "{{ ldap_base_dn }}"
+          classes: [top, dcObject, organization]
+          attributes: {dc: example, o: LLM Lab}
+        - dn: "{{ ldap_people_dn }}"
+          classes: [top, organizationalUnit]
+          attributes: {ou: people}
+        - dn: "ou=services,{{ ldap_base_dn }}"
+          classes: [top, organizationalUnit]
+          attributes: {ou: services}
+        - dn: "ou=policies,{{ ldap_base_dn }}"
+          classes: [top, organizationalUnit]
+          attributes: {ou: policies}
+      no_log: true
+
+    # パスワードポリシーの設定
+    - name: LDAP password policy
+      community.general.ldap_entry:
+        dn: "cn=default,ou=policies,{{ ldap_base_dn }}"
+        objectClass: [top, device, pwdPolicy]
+        attributes:
+          cn: default
+          pwdAttribute: userPassword
+          pwdCheckQuality: "1"
+          pwdMinLength: "12"
+          pwdInHistory: "5"
+          pwdMaxFailure: "5"
+          pwdFailureCountInterval: "300"
+          pwdLockout: "TRUE"
+          pwdLockoutDuration: "600"
+          pwdAllowUserChange: "TRUE"
+          pwdSafeModify: "FALSE"
+        state: present
+      no_log: true
+
+    # LDAPアカウント(demo, member)の作成
+    - name: Search account and lab users
+      community.general.ldap_entry:
+        dn: "{{ item.dn }}"
+        objectClass: "{{ item.classes }}"
+        attributes: "{{ item.attributes }}"
+        state: present
+      loop:
+        - dn: "{{ ldap_bind_dn }}"
+          classes: [top, account, simpleSecurityObject]
+          attributes:
+            uid: readonly
+            userPassword: "{CRYPT}{{ ldap_hashes.results[1].stdout }}"
+        - dn: "{{ ldap_demo_dn }}"
+          classes: [top, inetOrgPerson, posixAccount]
+          attributes:
+            uid: demo
+            cn: Demo User
+            sn: User
+            mail: demo@example.org
+            uidNumber: "20001"
+            gidNumber: "20000"
+            homeDirectory: /home/demo
+            loginShell: /bin/bash
+            userPassword: "{CRYPT}{{ ldap_hashes.results[2].stdout }}"
+        - dn: "{{ ldap_member_dn }}"
+          classes: [top, inetOrgPerson, posixAccount]
+          attributes:
+            uid: member
+            cn: Lab Member
+            sn: Member
+            mail: member@example.org
+            uidNumber: "20002"
+            gidNumber: "20000"
+            homeDirectory: /home/member
+            loginShell: /bin/bash
+            userPassword: "{CRYPT}{{ ldap_hashes.results[3].stdout }}"
+      no_log: true
+
+    # パスワード更新
+    - name: Current search and lab user passwords
+      community.general.ldap_attrs:
+        dn: "{{ item.dn }}"
+        attributes:
+          userPassword: "{CRYPT}{{ item.hash }}"
+        state: exact
+      loop:
+        - {dn: "{{ ldap_bind_dn }}", hash: "{{ ldap_hashes.results[1].stdout }}"}
+        - {dn: "{{ ldap_demo_dn }}", hash: "{{ ldap_hashes.results[2].stdout }}"}
+        - {dn: "{{ ldap_member_dn }}", hash: "{{ ldap_hashes.results[3].stdout }}"}
+      no_log: true
+
+  handlers:
+    # サービスの再読み込み
+    - name: Restart lab LDAP
+      ansible.builtin.systemd_service:
+        name: openldap
+        state: restarted
+        daemon_reload: true

@@ -1,0 +1,14 @@
+FROM docker.io/library/debian:bookworm-slim
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN groupadd --system --gid 101 openldap \
+    && useradd --system --uid 101 --gid openldap \
+       --home-dir /var/lib/ldap --shell /usr/sbin/nologin openldap \
+    && apt-get update \
+    && echo "slapd slapd/no_configuration boolean true" | debconf-set-selections \
+    && apt-get install --yes --no-install-recommends slapd ldap-utils ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /var/lib/ldap/* \
+    && install -d -o openldap -g openldap /run/slapd /var/lib/ldap
+
+EXPOSE 389 636
+CMD ["slapd", "-d", "0", "-u", "openldap", "-g", "openldap", "-f", "/etc/ldap/slapd.conf", "-h", "ldap://0.0.0.0:389 ldaps://0.0.0.0:636"]

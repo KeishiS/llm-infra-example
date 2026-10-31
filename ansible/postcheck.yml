@@ -1,0 +1,245 @@
+- name: Active VM firewall rules
+  hosts: all
+  become: true
+  tasks:
+    # VMに適用済みのnftablesテーブルの取得
+    - name: Read the lab firewall table
+      ansible.builtin.command: nft --json list table inet llm_lab_firewall
+      register: firewall_table
+      changed_when: false
+
+    # 入力通信を既定で拒否する設定の確認
+    - name: Unapproved inbound traffic is dropped by default
+      ansible.builtin.assert:
+        that:
+          - >-
+            (firewall_table.stdout | from_json).nftables
+            | selectattr('chain', 'defined') | map(attribute='chain')
+            | selectattr('name', 'equalto', 'input') | map(attribute='policy')
+            | list == ['drop']
+
+- name: OpenLDAP container
+  hosts: ldap_server
+  become: true
+  tasks:
+    # OpenLDAPコンテナの状態取得
+    - name: Read OpenLDAP container state
+      ansible.builtin.command: podman container inspect openldap
+      register: ldap_container
+      changed_when: false
+
+    # OpenLDAPコンテナの稼働確認
+    - name: OpenLDAP container is running
+      ansible.builtin.assert:
+        that:
+          - (ldap_container.stdout | from_json)[0].State.Running
+
+- name: LDAP login and chat/API inference through the gateway
+  hosts: webui_server
+  become: true
+  vars_files:
+    - ../.state/secrets.json
+  module_defaults:
+    ansible.builtin.uri:
+      use_proxy: false
+  tasks:
+    # ブラウザの初期化に使うバックエンド設定の取得
+    - name: Public browser configuration
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/config"
+      register: browser_config
+
+    # 応答の正常性確認
+    - name: Browser can discover the LDAP-enabled backend
+      ansible.builtin.assert:
+        that:
+          - browser_config.json.status | default(false)
+          - browser_config.json.features.enable_ldap | default(false)
+
+    # LDAPS接続とmemberユーザーの検索
+    - name: Certificate-verified LDAP search
+      community.general.ldap_search:
+        server_uri: "ldaps://{{ ldap_address }}:636"
+        ca_path: /etc/open-webui/ldap-ca.crt
+        validate_certs: true
+        bind_dn: "{{ ldap_bind_dn }}"
+        bind_pw: "{{ ldap_bind_password }}"
+        dn: "{{ ldap_people_dn }}"
+        filter: "(&(objectClass=posixAccount)(uid=member))"
+        scope: children
+        attrs: [uid, mail]
+      register: ldap_member
+      no_log: true
+
+    # memberユーザーが検索結果に1人含まれることの確認
+    - name: LDAP test user is visible
+      ansible.builtin.assert:
+        that:
+          - ldap_member.results | length == 1
+
+    # ローカルパスワード認証と新規登録の拒否確認
+    - name: Local login and public signup are blocked
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/{{ item }}"
+        method: POST
+        body_format: json
+        body: {}
+        status_code: 403
+      loop: [signin, signup]
+
+    # 認証なしのモデル一覧取得の拒否確認
+    - name: Model API requires authentication
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8081/v1/models"
+        status_code: [401, 403]
+
+    # 非公開APIへのアクセスの拒否確認
+    - name: Unpublished API endpoints are blocked
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8081/v1/responses"
+        method: POST
+        body_format: json
+        body: {}
+        status_code: 404
+
+    # 誤ったパスワードでのLDAPログインの拒否確認
+    - name: Incorrect LDAP password rejected
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/ldap"
+        method: POST
+        body_format: json
+        body:
+          user: member
+          password: "{{ ldap_member_password }}-incorrect"
+        status_code: [400, 401, 403]
+      no_log: true
+
+    # 一般ユーザーmemberのLDAPログイン
+    - name: Ordinary LDAP user login without a group requirement
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/ldap"
+        method: POST
+        body_format: json
+        body:
+          user: member
+          password: "{{ ldap_member_password }}"
+      register: member_login
+      no_log: true
+
+    # memberに一般ユーザー権限が付与されることの確認
+    - name: Ordinary LDAP user remains a regular user
+      ansible.builtin.assert:
+        that:
+          - member_login.json.role == 'user'
+        fail_msg: 初回管理者の事前作成とDEFAULT_USER_ROLEを確認してください。
+
+    # 管理者ユーザーdemoのLDAPログイン
+    - name: LDAP login links to the precreated administrator
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/ldap"
+        method: POST
+        body_format: json
+        body:
+          user: demo
+          password: "{{ ldap_demo_password }}"
+      register: admin_login
+      no_log: true
+
+    # demoの管理者権限とメールアドレスの確認
+    - name: Administrator role is preserved
+      ansible.builtin.assert:
+        that:
+          - admin_login.json.role == 'admin'
+          - admin_login.json.email == webui_admin_email
+
+    # memberの既存APIキーの有無確認・取得
+    - name: Read the test user's existing API key
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/api_key"
+        headers:
+          Authorization: "Bearer {{ member_login.json.token }}"
+        status_code: [200, 404]
+      register: existing_api_key
+      no_log: true
+
+    # memberのAPIキー発行
+    - name: Create an API key only when absent
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/api_key"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ member_login.json.token }}"
+      when: existing_api_key.status == 404
+      register: created_api_key
+      no_log: true
+
+    # 後続の検証で使うAPIキーの変数への格納
+    - name: Use the test user's API key
+      ansible.builtin.set_fact:
+        test_api_key: "{{ existing_api_key.json.api_key if existing_api_key.status == 200 else created_api_key.json.api_key }}"
+      no_log: true
+
+    # 個人APIキーによるモデル一覧取得
+    - name: Model list with a personal API key
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8081/v1/models"
+        headers:
+          Authorization: "Bearer {{ test_api_key }}"
+      register: api_models
+      no_log: true
+
+    # 設定したモデルIDが一覧に含まれることの確認
+    - name: Configured model is available through the gateway
+      ansible.builtin.assert:
+        that:
+          - llm_model_id in (api_models.json.data | map(attribute='id') | list)
+        fail_msg: >-
+          期待するモデル={{ llm_model_id }}、memberが取得したモデル一覧={{ api_models.json.data | map(attribute='id') | list }}。
+          Open WebUIの推論先への接続と、モデルの利用権限を確認してください。
+
+    # APIキーによるアカウント情報取得の拒否確認
+    - name: API key cannot access account endpoints
+      ansible.builtin.uri:
+        url: "http://{{ webui_address }}:8080/api/v1/auths/"
+        headers:
+          Authorization: "Bearer {{ test_api_key }}"
+        status_code: [401, 403]
+      no_log: true
+
+    # ブラウザ用トークンと個人APIキーによる推論の実行
+    - name: Inference using a browser token and a personal API key
+      ansible.builtin.uri:
+        url: "{{ item.url }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ item.token }}"
+        body_format: json
+        body:
+          model: "{{ llm_model_id }}"
+          messages:
+            - role: user
+              content: Say hello briefly.
+          stream: false
+          max_tokens: 128
+        timeout: "{{ llm_startup_seconds | int + 120 }}"
+      loop:
+        - label: browser
+          url: "http://{{ webui_address }}:8080/api/chat/completions"
+          token: "{{ member_login.json.token }}"
+        - label: api
+          url: "http://{{ webui_address }}:8081/v1/chat/completions"
+          token: "{{ test_api_key }}"
+      register: inference
+      no_log: true
+
+    # 両経路から空でない回答が返ることの確認
+    - name: Nonempty responses from both entry points
+      ansible.builtin.assert:
+        that:
+          - inference.results[0].json.choices[0].message.content | default('', true) | trim | length > 0
+          - inference.results[1].json.choices[0].message.content | default('', true) | trim | length > 0
+        fail_msg: >-
+          回答本文が空です。
+          browser={{ inference.results[0].json.choices[0].finish_reason | default('unknown') }},
+          api={{ inference.results[1].json.choices[0].finish_reason | default('unknown') }}
+        success_msg: LDAPS authentication, user API key and SSH-tunneled inference succeeded.

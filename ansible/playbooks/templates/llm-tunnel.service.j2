@@ -1,0 +1,16 @@
+[Unit]
+Description=LLM lab restricted inference SSH tunnel
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User={{ llm_tunnel_user }}
+Group={{ llm_tunnel_user }}
+ExecStart=/usr/bin/ssh -NT -F /var/lib/llm-tunnel/.ssh/config inference
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

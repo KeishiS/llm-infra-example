@@ -1,0 +1,211 @@
+- name: LDAP-authenticated chat and user API gateway
+  hosts: webui_server
+  become: true
+  vars_files:
+    - ../../.state/secrets.json
+  tasks:
+    # LDAP接続確認のためのPythonライブラリの導入
+    - name: LDAP preflight dependencies
+      ansible.builtin.apt:
+        name: python3-ldap
+        state: present
+
+    # Open WebUIのデータ・設定保存先ディレクトリ作成
+    - name: Persistent application and configuration directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - /srv/open-webui
+        - /etc/open-webui
+
+    # LDAP VMからのCA公開証明書の読み込み
+    - name: Read only the lab CA public certificate
+      ansible.builtin.slurp:
+        src: "{{ ldap_tls_dir }}/ca.crt"
+      delegate_to: "{{ groups['ldap_server'][0] }}"
+      register: ldap_ca_public
+
+    # LDAPSの証明書検証用CA公開証明書の配置
+    - name: Trusted LDAP CA
+      ansible.builtin.copy:
+        content: "{{ ldap_ca_public.content | b64decode }}"
+        dest: /etc/open-webui/ldap-ca.crt
+        mode: "0644"
+      notify: Restart Open WebUI
+
+    # LDAPS接続と管理者ユーザの検索
+    - name: Verify LDAPS and the administrator's LDAP entry
+      community.general.ldap_search:
+        server_uri: "ldaps://{{ ldap_address }}:636"
+        ca_path: /etc/open-webui/ldap-ca.crt
+        validate_certs: true
+        bind_dn: "{{ ldap_bind_dn }}"
+        bind_pw: "{{ ldap_bind_password }}"
+        dn: "{{ ldap_people_dn }}"
+        filter: "(&(objectClass=posixAccount)(mail={{ webui_admin_email }}))"
+        scope: children
+        attrs: [uid, mail]
+      register: ldap_admin_entry
+
+    # 管理者のメールアドレスに一致するLDAPユーザが1人であることの確認
+    - name: Require exactly one LDAP administrator identity
+      ansible.builtin.assert:
+        that:
+          - ldap_admin_entry.results | length == 1
+        fail_msg: webui_admin_emailと一致するLDAPユーザーを1人設定してください。
+
+    # Open WebUIの環境変数ファイル配置
+    - name: LDAP and inference environment
+      ansible.builtin.template:
+        src: webui.env.j2
+        dest: /etc/open-webui/webui.env
+        mode: "0600"
+      no_log: true
+      diff: false
+      notify: Restart Open WebUI
+
+    # Open WebUIコンテナのサービスファイル配置
+    - name: Open WebUI Quadlet definition
+      ansible.builtin.template:
+        src: open-webui.container.j2
+        dest: /etc/containers/systemd/open-webui.container
+        mode: "0644"
+      notify: Restart Open WebUI
+
+    # Open WebUIコンテナの起動
+    - name: Open WebUI service
+      ansible.builtin.systemd_service:
+        name: open-webui
+        state: started
+        daemon_reload: true
+
+    # handlerの実行
+    - name: Apply the loopback-only Open WebUI listener
+      ansible.builtin.meta: flush_handlers
+
+    # Open WebUIのヘルスチェック
+    - name: Open WebUI health
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000/health
+        use_proxy: false
+      register: webui_health
+      until: webui_health.status | default(0) == 200
+      retries: 120
+      delay: 5
+
+    # Caddyの設定ファイル配置
+    - name: Public chat and API routes
+      ansible.builtin.template:
+        src: Caddyfile.j2
+        dest: /etc/open-webui/Caddyfile
+        mode: "0644"
+      notify: Restart Caddy
+
+    # Caddyコンテナのサービスファイル配置
+    - name: HTTP gateway Quadlet
+      ansible.builtin.template:
+        src: caddy.container.j2
+        dest: /etc/containers/systemd/llm-caddy.container
+        mode: "0644"
+      notify: Restart Caddy
+
+    # Caddyコンテナの起動
+    - name: Start the HTTP gateway
+      ansible.builtin.systemd_service:
+        name: llm-caddy
+        state: started
+        daemon_reload: true
+
+    # handlerの実行
+    - name: Apply gateway configuration
+      ansible.builtin.meta: flush_handlers
+
+    # Caddy経由でのヘルスチェック
+    - name: Public chat health
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:8080/health"
+        use_proxy: false
+      register: gateway_health
+      until: gateway_health.status | default(0) == 200
+      retries: 24
+      delay: 5
+
+    # ブラウザの初期化に使うバックエンド設定の取得
+    - name: Public browser configuration
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:8080/api/config"
+        use_proxy: false
+      register: browser_config
+
+    # 応答の正常性確認
+    - name: Browser can discover the LDAP-enabled backend
+      ansible.builtin.assert:
+        that:
+          - browser_config.json.status | default(false)
+          - browser_config.json.features.enable_ldap | default(false)
+        fail_msg: /api/configからLDAP対応のバックエンド設定を取得できません。
+
+    # モデルの利用権限を設定するための管理者ログイン
+    - name: Administrator login for model access configuration
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:8080/api/v1/auths/ldap"
+        method: POST
+        body_format: json
+        body:
+          user: demo
+          password: "{{ ldap_demo_password }}"
+        use_proxy: false
+      register: webui_setup_login
+      no_log: true
+
+    # 設定したモデルの登録状況と既存の利用権限の取得
+    - name: Read configured model access
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:8080/api/v1/models/model?id={{ llm_model_id | urlencode }}"
+        headers:
+          Authorization: "Bearer {{ webui_setup_login.json.token }}"
+        status_code: [200, 404]
+        use_proxy: false
+      register: webui_model_access
+      no_log: true
+
+    # モデルの登録とログイン済みユーザーへの利用権限付与
+    - name: Allow authenticated users to use the configured model
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:8080/api/v1/models/model/access/update"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ webui_setup_login.json.token }}"
+        body_format: json
+        body:
+          id: "{{ llm_model_id }}"
+          name: "{{ llm_model_id }}"
+          access_grants: >-
+            {{ (webui_model_access.json.access_grants | default([]))
+               + [{'principal_type': 'user', 'principal_id': '*', 'permission': 'read'}] }}
+        use_proxy: false
+      when: >-
+        webui_model_access.status == 404 or
+        (webui_model_access.json.access_grants | default([])
+         | selectattr('principal_type', 'equalto', 'user')
+         | selectattr('principal_id', 'equalto', '*')
+         | selectattr('permission', 'equalto', 'read') | list | length) == 0
+      changed_when: true
+      no_log: true
+
+  handlers:
+    # Open WebUIコンテナの再起動
+    - name: Restart Open WebUI
+      ansible.builtin.systemd_service:
+        name: open-webui
+        state: restarted
+        daemon_reload: true
+
+    # Caddyコンテナの再起動
+    - name: Restart Caddy
+      ansible.builtin.systemd_service:
+        name: llm-caddy
+        state: restarted
+        daemon_reload: true

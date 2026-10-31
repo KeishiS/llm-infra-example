@@ -1,0 +1,41 @@
+include /etc/ldap/schema/core.schema
+include /etc/ldap/schema/cosine.schema
+include /etc/ldap/schema/nis.schema
+include /etc/ldap/schema/inetorgperson.schema
+modulepath /usr/lib/ldap
+moduleload back_mdb
+moduleload ppolicy
+pidfile /run/slapd/slapd.pid
+argsfile /run/slapd/slapd.args
+
+TLSCertificateFile {{ ldap_tls_dir }}/server.crt
+TLSCertificateKeyFile {{ ldap_tls_dir }}/server.key
+TLSCACertificateFile {{ ldap_tls_dir }}/ca.crt
+TLSProtocolMin 3.3
+disallow bind_anon
+require authc
+
+database mdb
+maxsize 1073741824
+suffix "{{ ldap_base_dn }}"
+rootdn "{{ ldap_admin_dn }}"
+rootpw {CRYPT}{{ ldap_hashes.results[0].stdout }}
+directory /var/lib/ldap
+index objectClass eq
+index uid,mail eq
+
+overlay ppolicy
+ppolicy_default "cn=default,ou=policies,{{ ldap_base_dn }}"
+ppolicy_hash_cleartext
+
+access to attrs=userPassword
+    by self write
+    by anonymous auth
+    by * none
+# mailは管理者だけが変更し、管理者アカウントとの紐付けを保護します。
+access to dn.subtree="{{ ldap_people_dn }}"
+    by dn.exact="{{ ldap_bind_dn }}" read
+    by self read
+    by * none
+access to *
+    by * none

@@ -1,0 +1,20 @@
+# IncusでのOpenLDAPサーバ設定
+name: ldap
+type: virtual-machine
+architecture: x86_64
+profiles: []
+config:
+  limits.cpu: "1"
+  limits.memory: 1536MiB
+  security.secureboot: "false"
+devices:
+  root:
+    type: disk
+    path: /
+    pool: llm-lab
+    size: 12GiB
+  eth0:
+    type: nic
+    name: eth0
+    network: llmbr0
+    ipv4.address: 192.168.76.10

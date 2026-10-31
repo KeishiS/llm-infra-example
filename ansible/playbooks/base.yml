@@ -1,0 +1,27 @@
+- name: Common runtime preparation
+  hosts: all
+  become: true
+  tasks:
+    # Ansibleの一時作業ディレクトリの作成
+    - name: Private temporary directory for privileged Ansible tasks
+      ansible.builtin.file:
+        path: /root/.ansible/tmp
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # PodmanとCA証明書の導入
+    - name: Container runtime packages
+      ansible.builtin.apt:
+        name: [podman, ca-certificates]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # Quadletディレクトリの作成
+    - name: Quadlet directory
+      ansible.builtin.file:
+        path: /etc/containers/systemd
+        state: directory
+        mode: "0755"

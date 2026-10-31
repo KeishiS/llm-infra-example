@@ -1,0 +1,27 @@
+[Unit]
+Description=LLM lab OpenLDAP (Podman container)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image={{ ldap_image }}
+ContainerName=openldap
+Pull=never
+Network={{ ldap_container_network }}
+IP={{ ldap_container_ip }}
+PublishPort=127.0.0.1:389:389
+PublishPort={{ private_ip }}:636:636
+Volume=/etc/openldap/slapd.conf:/etc/ldap/slapd.conf:ro
+Volume={{ ldap_tls_dir }}/ca.crt:{{ ldap_tls_dir }}/ca.crt:ro
+Volume={{ ldap_tls_dir }}/server.crt:{{ ldap_tls_dir }}/server.crt:ro
+Volume={{ ldap_tls_dir }}/server.key:{{ ldap_tls_dir }}/server.key:ro
+Volume=/srv/openldap/data:/var/lib/ldap
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

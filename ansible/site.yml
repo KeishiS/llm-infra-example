@@ -1,0 +1,21 @@
+# VMへの接続と初期設定の完了を確認するプレイブックを読み込みます。
+- name: VM precheck
+  ansible.builtin.import_playbook: precheck.yml
+# 各VMの共通パッケージと作業ディレクトリを準備するプレイブックを読み込みます。
+- name: Common operating system and runtime
+  ansible.builtin.import_playbook: playbooks/base.yml
+# 各VMのファイアウォールを設定するプレイブックを読み込みます。
+- name: VM firewall
+  ansible.builtin.import_playbook: playbooks/firewall.yml
+# OpenLDAPと認証用のユーザーを設定するプレイブックを読み込みます。
+- name: LDAP directory
+  ansible.builtin.import_playbook: playbooks/ldap.yml
+# CPU推論サービスを設定するプレイブックを読み込みます。
+- name: LLM backend
+  ansible.builtin.import_playbook: playbooks/llm.yml
+# WebUI VMとLLM VMをSSHトンネルで接続するプレイブックを読み込みます。
+- name: Encrypted inference connection
+  ansible.builtin.import_playbook: playbooks/tunnel.yml
+# Open WebUIとCaddyを設定するプレイブックを読み込みます。
+- name: Web interface
+  ansible.builtin.import_playbook: playbooks/webui.yml

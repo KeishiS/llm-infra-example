@@ -1,0 +1,56 @@
+- name: VM firewall
+  hosts: all
+  become: true
+  tasks:
+    # nftablesの導入
+    - name: nftables package
+      ansible.builtin.apt:
+        name: nftables
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # 標準のnftablesサービスの無効化
+    - name: Disable distribution firewall loader
+      ansible.builtin.systemd_service:
+        name: nftables
+        enabled: false
+
+    # 設定ファイルの検証と配置
+    - name: VM firewall rules
+      ansible.builtin.template:
+        src: llm-lab-firewall.nft.j2
+        dest: /etc/llm-lab-firewall.nft
+        owner: root
+        group: root
+        mode: "0600"
+        validate: /usr/bin/unshare --net /usr/sbin/nft --check --file %s
+      notify: Reload lab firewall
+
+    # サービスファイルの配置
+    - name: VM firewall service definition
+      ansible.builtin.copy:
+        src: llm-lab-firewall.service
+        dest: /etc/systemd/system/llm-lab-firewall.service
+        mode: "0644"
+      notify: Reload lab firewall
+
+    # 自動起動の有効化
+    - name: Start VM firewall
+      ansible.builtin.systemd_service:
+        name: llm-lab-firewall
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # handlerの実行
+    - name: Apply firewall rules before starting containers
+      ansible.builtin.meta: flush_handlers
+
+  handlers:
+    # サービスの再読み込み
+    - name: Reload lab firewall
+      ansible.builtin.systemd_service:
+        name: llm-lab-firewall
+        state: reloaded
+        daemon_reload: true

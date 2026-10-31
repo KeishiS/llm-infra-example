@@ -1,0 +1,42 @@
+# 各IPアドレス
+ldap_address: "{{ hostvars[groups['ldap_server'][0]].private_ip }}"
+webui_address: "{{ hostvars[groups['webui_server'][0]].private_ip }}"
+llm_address: "{{ hostvars[groups['llm_server'][0]].private_ip }}"
+
+# LDAP認証・検証用ユーザ
+ldap_base_dn: dc=example,dc=org
+ldap_admin_dn: "cn=admin,{{ ldap_base_dn }}"
+ldap_people_dn: "ou=people,{{ ldap_base_dn }}"
+ldap_bind_dn: "uid=readonly,ou=services,{{ ldap_base_dn }}"
+ldap_demo_dn: "uid=demo,{{ ldap_people_dn }}"
+ldap_member_dn: "uid=member,{{ ldap_people_dn }}"
+ldap_member_password: "{{ (webui_secret_key ~ ':ldap-member') | hash('sha256') }}"
+
+# LDAPコンテナ
+ldap_tls_dir: /etc/openldap/tls
+ldap_image: localhost/llm-lab-openldap:bookworm
+ldap_container_network: llm-lab-ldap
+ldap_container_subnet: 10.89.76.0/24
+ldap_container_ip: 10.89.76.2
+
+# ファイアウォール
+firewall_trusted_ipv4_cidrs: [192.168.76.0/24]
+
+# LLM推論
+llm_image: ghcr.io/mostlygeek/llama-swap:v267-cpu-b11913
+llm_model: Qwen/Qwen3-0.6B-GGUF:Q8_0
+llm_model_id: qwen3-0.6b
+llm_listen_port: 8080
+llm_context_size: 8192
+llm_threads: 2
+llm_idle_seconds: 1800
+llm_startup_seconds: 3600
+
+# 推論先へのSSHトンネル
+llm_tunnel_port: 18080
+llm_tunnel_user: llm-tunnel
+
+# Open WebUI
+webui_admin_email: demo@example.org
+webui_image: ghcr.io/open-webui/open-webui:v0.12.1-slim
+caddy_image: docker.io/library/caddy:2.11.4-alpine

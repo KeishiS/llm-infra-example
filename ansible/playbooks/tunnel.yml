@@ -1,0 +1,161 @@
+- name: Prepare the gateway tunnel key
+  hosts: webui_server
+  become: true
+  tasks:
+    # WebUI VMのトンネル専用グループ作成
+    - name: Local tunnel group
+      ansible.builtin.group:
+        name: "{{ llm_tunnel_user }}"
+        system: true
+
+    # WebUI VMのトンネル専用ユーザー作成
+    - name: Dedicated local tunnel account
+      ansible.builtin.user:
+        name: "{{ llm_tunnel_user }}"
+        group: "{{ llm_tunnel_user }}"
+        home: /var/lib/llm-tunnel
+        system: true
+        shell: /bin/sh
+        password_lock: true
+
+    # トンネル専用ユーザーのSSH設定ディレクトリ作成
+    - name: Private tunnel SSH directory
+      ansible.builtin.file:
+        path: /var/lib/llm-tunnel/.ssh
+        state: directory
+        owner: "{{ llm_tunnel_user }}"
+        group: "{{ llm_tunnel_user }}"
+        mode: "0700"
+
+    # トンネル用SSH鍵の生成
+    - name: Persistent tunnel key independent of the operator's YubiKey
+      ansible.builtin.command:
+        argv: [ssh-keygen, -q, -t, ed25519, -N, "", -f, /var/lib/llm-tunnel/.ssh/id_ed25519]
+        creates: /var/lib/llm-tunnel/.ssh/id_ed25519
+      become_user: "{{ llm_tunnel_user }}"
+
+    # WebUI VMのトンネル用SSH公開鍵の読み込み
+    - name: Read the tunnel public key
+      ansible.builtin.slurp:
+        src: /var/lib/llm-tunnel/.ssh/id_ed25519.pub
+      register: llm_tunnel_public_key
+
+- name: Authorize only inference forwarding
+  hosts: llm_server
+  become: true
+  tasks:
+    # LLM VMのトンネル専用グループ作成
+    - name: Forwarding account group
+      ansible.builtin.group:
+        name: "{{ llm_tunnel_user }}"
+        system: true
+
+    # LLM VMのトンネル専用ユーザー作成
+    - name: Dedicated forwarding account
+      ansible.builtin.user:
+        name: "{{ llm_tunnel_user }}"
+        group: "{{ llm_tunnel_user }}"
+        system: true
+        create_home: true
+        shell: /bin/sh
+        password_lock: true
+
+    # 推論ポートへの転送だけを許可するSSH公開鍵の登録
+    - name: Restricted gateway public key
+      ansible.posix.authorized_key:
+        user: "{{ llm_tunnel_user }}"
+        key: "{{ hostvars[groups['webui_server'][0]].llm_tunnel_public_key.content | b64decode }}"
+        exclusive: true
+        key_options: 'restrict,port-forwarding,permitopen="127.0.0.1:{{ llm_listen_port }}",command="/bin/false"'
+
+    # SSH転送の制限設定の検証・配置
+    - name: SSH forwarding restrictions
+      ansible.builtin.template:
+        src: llm-tunnel.sshd.j2
+        dest: /etc/ssh/sshd_config.d/00-llm-tunnel.conf
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s
+      notify: Reload SSH
+
+    # SSHサーバー設定全体の構文検証
+    - name: Validate the complete SSH configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    # handlerの実行
+    - name: Apply forwarding restrictions
+      ansible.builtin.meta: flush_handlers
+
+    # LLM VMのSSHホスト公開鍵の読み込み
+    - name: Read the inference SSH host public key
+      ansible.builtin.slurp:
+        src: /etc/ssh/ssh_host_ed25519_key.pub
+      register: llm_host_public_key
+  handlers:
+    # SSHサーバー設定の再読み込み
+    - name: Reload SSH
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded
+
+- name: Connect the gateway to inference
+  hosts: webui_server
+  become: true
+  tasks:
+    # LLM VMのSSHホスト公開鍵の登録
+    - name: Pin the inference host key
+      ansible.builtin.copy:
+        content: "llm-inference {{ hostvars[groups['llm_server'][0]].llm_host_public_key.content | b64decode | trim }}\n"
+        dest: /var/lib/llm-tunnel/.ssh/known_hosts
+        owner: "{{ llm_tunnel_user }}"
+        group: "{{ llm_tunnel_user }}"
+        mode: "0600"
+      notify: Restart inference tunnel
+
+    # トンネル用SSH接続設定の配置
+    - name: Tunnel connection settings
+      ansible.builtin.template:
+        src: llm-tunnel.ssh.j2
+        dest: /var/lib/llm-tunnel/.ssh/config
+        owner: "{{ llm_tunnel_user }}"
+        group: "{{ llm_tunnel_user }}"
+        mode: "0600"
+      notify: Restart inference tunnel
+
+    # SSHトンネルのサービスファイル配置
+    - name: Persistent tunnel service
+      ansible.builtin.template:
+        src: llm-tunnel.service.j2
+        dest: /etc/systemd/system/llm-tunnel.service
+        mode: "0644"
+      notify: Restart inference tunnel
+
+    # SSHトンネルの起動と自動起動の有効化
+    - name: Start the inference tunnel
+      ansible.builtin.systemd_service:
+        name: llm-tunnel
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    # handlerの実行
+    - name: Apply tunnel configuration
+      ansible.builtin.meta: flush_handlers
+
+    # SSHトンネル経由でのモデル一覧取得までの待機
+    - name: Model list through the SSH tunnel
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ llm_tunnel_port }}/v1/models"
+        use_proxy: false
+      register: tunnel_models
+      until: tunnel_models.status | default(0) == 200
+      retries: 24
+      delay: 5
+
+  handlers:
+    # SSHトンネルの再起動
+    - name: Restart inference tunnel
+      ansible.builtin.systemd_service:
+        name: llm-tunnel
+        state: restarted
+        daemon_reload: true

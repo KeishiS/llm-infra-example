@@ -1,0 +1,21 @@
+[Unit]
+Description=LLM lab HTTP chat and OpenAI-compatible API
+Wants=network-online.target open-webui.service
+After=network-online.target open-webui.service
+
+[Container]
+Image={{ caddy_image }}
+ContainerName=llm-caddy
+Pull=missing
+Network=host
+Volume=/etc/open-webui/Caddyfile:/etc/caddy/Caddyfile:ro
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
